@@ -94,9 +94,9 @@ def launch_gui() -> int:
         QSpinBox,
         QSplitter,
         QTabWidget,
-        QTextEdit,
         QVBoxLayout,
         QWidget,
+        QTextEdit,
     )
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.figure import Figure
@@ -132,6 +132,7 @@ def launch_gui() -> int:
             self.setWindowTitle("DCR / PDE / APP Plotter")
             self.resize(1280, 760)
             self.groups: Dict[str, List[Path]] = {}
+            self.group_corrections: Dict[str, float] = {}
             self.note_configs: Dict[str, NoteConfig] = {"dcr": NoteConfig(), "app": NoteConfig()}
             self._drag_key: Optional[str] = None
             self._drag_dx = 0.0
@@ -151,6 +152,7 @@ def launch_gui() -> int:
             group_layout = QVBoxLayout(group_box)
             self.group_list = QListWidget()
             self.group_list.currentItemChanged.connect(self._refresh_file_view)
+            self.group_list.currentItemChanged.connect(self._on_group_selection_changed)
             group_layout.addWidget(self.group_list)
             form = QFormLayout()
             self.group_name_edit = QLineEdit()
@@ -207,7 +209,9 @@ def launch_gui() -> int:
             self.legend_loc_combo = QComboBox(); self.legend_loc_combo.addItem("Upper Right", "upper right"); self.legend_loc_combo.addItem("Upper Left", "upper left"); self.legend_loc_combo.addItem("Lower Right", "lower right"); self.legend_loc_combo.addItem("Lower Left", "lower left")
             self.export_dpi_combo = QComboBox(); self.export_dpi_combo.addItem("72 DPI (Web)", 72); self.export_dpi_combo.addItem("150 DPI (Draft)", 150); self.export_dpi_combo.addItem("300 DPI (High)", 300); self.export_dpi_combo.addItem("600 DPI (Print)", 600); self.export_dpi_combo.addItem("1200 DPI (Ultra)", 1200); self.export_dpi_combo.setCurrentIndex(2)
             self.export_format_combo = QComboBox(); self.export_format_combo.addItem("TIFF + LZW (Lossless)", "tiff"); self.export_format_combo.addItem("PNG (Lossless)", "png"); self.export_format_combo.addItem("JPEG (Lossy, Smallest)", "jpeg")
+            self.pde_correction_mode_combo = QComboBox(); self.pde_correction_mode_combo.addItem("Global", "global"); self.pde_correction_mode_combo.addItem("Per Group", "per_group")
             self.pde_correction_factor_spin = QDoubleSpinBox(); self.pde_correction_factor_spin.setRange(0.01, 100.0); self.pde_correction_factor_spin.setSingleStep(0.01); self.pde_correction_factor_spin.setDecimals(4); self.pde_correction_factor_spin.setValue(1.0)
+            self.group_correction_factor_spin = QDoubleSpinBox(); self.group_correction_factor_spin.setRange(0.01, 100.0); self.group_correction_factor_spin.setSingleStep(0.01); self.group_correction_factor_spin.setDecimals(4); self.group_correction_factor_spin.setValue(1.0)
             self.note_enabled_check = QCheckBox("Enable Note"); self.note_enabled_check.setChecked(True)
             self.note_text_edit = QLineEdit("Custom Note")
             self.note_loc_combo = QComboBox(); self.note_loc_combo.addItem("Upper Left", "upper left"); self.note_loc_combo.addItem("Upper Right", "upper right"); self.note_loc_combo.addItem("Lower Left", "lower left"); self.note_loc_combo.addItem("Lower Right", "lower right"); self.note_loc_combo.addItem("Center", "center")
@@ -220,7 +224,9 @@ def launch_gui() -> int:
             style_form.addRow("Legend Position", self.legend_loc_combo)
             style_form.addRow("Export DPI", self.export_dpi_combo)
             style_form.addRow("Export Format", self.export_format_combo)
+            style_form.addRow("PDE Correction Mode", self.pde_correction_mode_combo)
             style_form.addRow("PDE Correction Factor", self.pde_correction_factor_spin)
+            style_form.addRow("Group PDE Factor", self.group_correction_factor_spin)
             style_form.addRow("Note Enabled", self.note_enabled_check)
             style_form.addRow("Note Text", self.note_text_edit)
             style_form.addRow("Note Position", self.note_loc_combo)
@@ -231,6 +237,7 @@ def launch_gui() -> int:
             for widget in [self.font_size_spin, self.line_width_spin, self.fig_width_spin, 
                           self.fig_height_spin, self.legend_loc_combo, self.export_dpi_combo,
                           self.export_format_combo, self.pde_correction_factor_spin, 
+                          self.pde_correction_mode_combo, self.group_correction_factor_spin,
                           self.note_font_spin, self.note_loc_combo]:
                 MouseWheelBlocker(widget)
             self.btn_apply_style = QPushButton("Apply Style")
@@ -241,6 +248,8 @@ def launch_gui() -> int:
             self.note_loc_combo.currentIndexChanged.connect(self._on_note_loc_changed)
             self.note_font_spin.valueChanged.connect(self._apply_note_settings_to_canvases)
             self.btn_reset_note.clicked.connect(self._reset_note_positions)
+            self.pde_correction_mode_combo.currentIndexChanged.connect(self._on_pde_correction_mode_changed)
+            self.group_correction_factor_spin.valueChanged.connect(self._on_group_factor_changed)
             self.btn_plot = QPushButton("Parse + Plot")
             self.btn_save_dcr = QPushButton("Save PDE-DCR TIFF")
             self.btn_save_app = QPushButton("Save PDE-APP TIFF")
@@ -298,6 +307,7 @@ def launch_gui() -> int:
             if name in self.groups:
                 QMessageBox.warning(self, "Duplicate Group", f"Group '{name}' already exists."); return
             self.groups[name] = []
+            self.group_corrections.setdefault(name, 1.0)
             self.group_list.addItem(QListWidgetItem(name))
             self.group_list.setCurrentRow(self.group_list.count() - 1)
         def _on_add_group(self) -> None:
@@ -312,12 +322,15 @@ def launch_gui() -> int:
             if new != old and new in self.groups:
                 QMessageBox.warning(self, "Duplicate Group", f"Group '{new}' already exists."); return
             self.groups[new] = self.groups.pop(old)
+            if old in self.group_corrections:
+                self.group_corrections[new] = self.group_corrections.pop(old)
             self.group_list.currentItem().setText(new)
         def _on_delete_group(self) -> None:
             name = self._selected_group_name()
             if not name:
                 QMessageBox.information(self, "No Selection", "Please select a group first."); return
             self.groups.pop(name, None)
+            self.group_corrections.pop(name, None)
             self.group_list.takeItem(self.group_list.currentRow())
             self._refresh_file_view()
         def _on_add_files(self) -> None:
@@ -365,6 +378,7 @@ def launch_gui() -> int:
             if group_name in self.groups:
                 return
             self.groups[group_name] = []
+            self.group_corrections.setdefault(group_name, 1.0)
             self.group_list.addItem(QListWidgetItem(group_name))
         def _all_group_files(self) -> set[Path]:
             result: set[Path] = set()
@@ -410,7 +424,8 @@ def launch_gui() -> int:
         def _refresh_file_view(self, *_args) -> None:
             name = self._selected_group_name()
             if not name:
-                self.files_view.clear(); return
+                self.files_view.clear()
+                return
             files = self.groups.get(name, [])
             self.files_view.setPlainText("No files in this group." if not files else "\n".join(str(f) for f in files))
         def _collect_group_points(self) -> Tuple[Dict[str, List[DataPoint]], List[str]]:
@@ -436,14 +451,38 @@ def launch_gui() -> int:
             return int(self.export_dpi_combo.currentData())
         def _current_export_format(self) -> str:
             return str(self.export_format_combo.currentData())
+        def _current_pde_correction_mode(self) -> str:
+            return str(self.pde_correction_mode_combo.currentData() or "global")
         def _get_pde_correction_factor(self) -> float:
             return float(self.pde_correction_factor_spin.value())
+        def _get_group_correction_factor(self, group_name: str) -> float:
+            return float(self.group_corrections.get(group_name, 1.0))
+        def _on_group_selection_changed(self, *_args) -> None:
+            name = self._selected_group_name()
+            if not name:
+                return
+            factor = self.group_corrections.get(name, 1.0)
+            self.group_correction_factor_spin.blockSignals(True)
+            self.group_correction_factor_spin.setValue(factor)
+            self.group_correction_factor_spin.blockSignals(False)
+        def _on_group_factor_changed(self, value: float) -> None:
+            name = self._selected_group_name()
+            if not name:
+                return
+            self.group_corrections[name] = float(value)
+            self._plot_all()
         @staticmethod
         def _clamp01(value: float) -> float:
             return max(0.0, min(1.0, value))
         @staticmethod
         def _note_defaults_for_loc(loc: str) -> tuple[float, float, str, str]:
-            mapping = {"upper left": (0.03, 0.97, "left", "top"), "upper right": (0.97, 0.97, "right", "top"), "lower left": (0.03, 0.03, "left", "bottom"), "lower right": (0.97, 0.03, "right", "bottom"), "center": (0.50, 0.50, "center", "center")}
+            mapping = {
+                "upper left": (0.03, 0.97, "left", "top"),
+                "upper right": (0.97, 0.97, "right", "top"),
+                "lower left": (0.03, 0.03, "left", "bottom"),
+                "lower right": (0.97, 0.03, "right", "bottom"),
+                "center": (0.50, 0.50, "center", "center"),
+            }
             return mapping.get(loc, mapping["upper left"])
         def _sync_note_configs_from_ui(self, reset_positions: bool = False) -> None:
             enabled = self.note_enabled_check.isChecked()
@@ -459,12 +498,30 @@ def launch_gui() -> int:
                     cfg.x, cfg.y, cfg.ha, cfg.va = self._note_defaults_for_loc(loc)
         def _render_note_on_canvas(self, canvas: MatplotlibCanvas, cfg: NoteConfig) -> None:
             if canvas.note_artist is not None:
-                try: canvas.note_artist.remove()
-                except Exception: pass
+                try:
+                    canvas.note_artist.remove()
+                except Exception:
+                    pass
                 canvas.note_artist = None
             if not cfg.enabled or not cfg.text:
                 return
-            artist = canvas.ax.text(cfg.x, cfg.y, cfg.text, transform=canvas.ax.transAxes, fontsize=cfg.fontsize, color="black", ha=cfg.ha, va=cfg.va, bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "black", "alpha": 0.65}, zorder=10)
+            artist = canvas.ax.text(
+                cfg.x,
+                cfg.y,
+                cfg.text,
+                transform=canvas.ax.transAxes,
+                fontsize=cfg.fontsize,
+                color="black",
+                ha=cfg.ha,
+                va=cfg.va,
+                bbox={
+                    "boxstyle": "round,pad=0.25",
+                    "facecolor": "white",
+                    "edgecolor": "black",
+                    "alpha": 0.65,
+                },
+                zorder=10,
+            )
             canvas.note_artist = artist
         def _render_notes(self) -> None:
             self._render_note_on_canvas(self.canvas_dcr, self.note_configs["dcr"])
@@ -474,7 +531,8 @@ def launch_gui() -> int:
                 return
             self._sync_note_configs_from_ui(reset_positions=reset_positions)
             self._render_notes()
-            self.canvas_dcr.draw(); self.canvas_app.draw()
+            self.canvas_dcr.draw()
+            self.canvas_app.draw()
         def _reset_note_positions(self) -> None:
             self._apply_note_settings_to_canvases(reset_positions=True)
         def _on_note_loc_changed(self, *_args) -> None:
@@ -512,6 +570,13 @@ def launch_gui() -> int:
         def _on_note_release(self, canvas_key: str, canvas: MatplotlibCanvas, event) -> None:
             if self._drag_key == canvas_key:
                 self._drag_key = None
+        def _on_pde_correction_mode_changed(self, *_args) -> None:
+            self._plot_all()
+        def _pde_factor_for_group(self, group_name: str) -> float:
+            mode = self._current_pde_correction_mode()
+            if mode == "per_group":
+                return self._get_group_correction_factor(group_name)
+            return self._get_pde_correction_factor()
         def _apply_style_to_canvases(self) -> None:
             style = self._current_plot_style()
             self._sync_note_configs_from_ui(reset_positions=False)
@@ -531,7 +596,6 @@ def launch_gui() -> int:
         def _plot_all(self) -> None:
             group_points, errors = self._collect_group_points()
             style = self._current_plot_style()
-            pde_factor = self._get_pde_correction_factor()
             self._sync_note_configs_from_ui(reset_positions=False)
             self.canvas_dcr.reset(); self.canvas_app.reset()
             for canvas in (self.canvas_dcr, self.canvas_app):
@@ -542,6 +606,7 @@ def launch_gui() -> int:
                 canvas.ax.yaxis.label.set_fontsize(style["font_size"])
             for group_name, points in group_points.items():
                 points = sorted(points, key=lambda p: p.pde_percent)
+                pde_factor = self._pde_factor_for_group(group_name)
                 pde = [p.pde_percent * pde_factor for p in points]
                 dcr = [p.dcr_k for p in points]
                 app = [p.app_percent for p in points]
